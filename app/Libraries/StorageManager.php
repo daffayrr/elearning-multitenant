@@ -4,166 +4,462 @@ namespace App\Libraries;
 
 use Aws\S3\S3Client;
 use Aws\Exception\AwsException;
-use Config\Storage as StorageConfig;
+use Aws\S3\Exception\S3Exception;
+use Aws\Exception\MultipartUploadException;   // Fix P1009/PHP0413: namespace yang benar
 
 /**
- * StorageManager — Abstraksi upload/download IDrive e2
- * 
- * Install dependency: composer require aws/aws-sdk-php
- * 
- * Penggunaan:
- *   $storage = new \App\Libraries\StorageManager();
- *   $url = $storage->upload($file, 'materi/course-1/modul.pdf', $tenantBucket);
+ * StorageManager — IDrive e2 (S3 Compatible) Library
+ *
+ * Prerequisite:
+ *   composer require aws/aws-sdk-php
+ *
+ * .env yang diperlukan:
+ *   storage.idrive_e2.key       = YOUR_ACCESS_KEY_ID
+ *   storage.idrive_e2.secret    = YOUR_SECRET_ACCESS_KEY
+ *   storage.idrive_e2.region    = e2-us-east-1
+ *   storage.idrive_e2.bucket    = your-bucket-name
+ *   storage.idrive_e2.endpoint  = https://e2-us-east-1.storage.idrivecloud.io
+ *   storage.idrive_e2.url_expiry = 3600
  */
 class StorageManager
 {
     protected S3Client $client;
-    protected array $config;
 
+    protected string $bucket;
+    protected string $endpoint;
+    protected string $region;
+    protected int    $urlExpiry;
+
+    protected array $allowedMimeTypes = [
+        'application/pdf',
+        'application/msword',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'application/vnd.ms-excel',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'application/vnd.ms-powerpoint',
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        'image/jpeg',
+        'image/png',
+        'image/gif',
+        'image/webp',
+        'video/mp4',
+        'video/webm',
+        'video/quicktime',
+        'audio/mpeg',
+        'audio/wav',
+        'audio/ogg',
+        'text/plain',
+        'text/csv',
+        'application/zip',
+        'application/x-zip-compressed',
+    ];
+
+    protected int $maxFileSizeBytes = 524_288_000; // 500 MB
+
+    // ═════════════════════════════════════════════════════════════════════
+    // CONSTRUCTOR
+    // ═════════════════════════════════════════════════════════════════════
     public function __construct()
     {
-        $cfg = config('Storage');
-        $this->config = $cfg->disks['idrive_e2'];
+        $key      = env('storage.idrive_e2.key');
+        $secret   = env('storage.idrive_e2.secret');
+        $region   = env('storage.idrive_e2.region');
+        $endpoint = env('storage.idrive_e2.endpoint');
+        $bucket   = env('storage.idrive_e2.bucket');
+        $expiry   = (int) env('storage.idrive_e2.url_expiry', 3600);
 
-        // Override dari .env jika ada
-        $this->config['key']      = env('storage.idrive_e2.key',      $this->config['key']);
-        $this->config['secret']   = env('storage.idrive_e2.secret',   $this->config['secret']);
-        $this->config['region']   = env('storage.idrive_e2.region',   $this->config['region']);
-        $this->config['bucket']   = env('storage.idrive_e2.bucket',   $this->config['bucket']);
-        $this->config['endpoint'] = env('storage.idrive_e2.endpoint', $this->config['endpoint']);
+        $missing = array_filter([
+            'storage.idrive_e2.key'      => $key,
+            'storage.idrive_e2.secret'   => $secret,
+            'storage.idrive_e2.region'   => $region,
+            'storage.idrive_e2.endpoint' => $endpoint,
+            'storage.idrive_e2.bucket'   => $bucket,
+        ], fn($v) => empty($v));
+
+        if (! empty($missing)) {
+            $keys = implode(', ', array_keys($missing));
+            log_message('critical', "[StorageManager] Konfigurasi .env tidak lengkap: {$keys}");
+            throw new \RuntimeException(
+                "Konfigurasi IDrive e2 tidak lengkap. Periksa .env: {$keys}"
+            );
+        }
+
+        $this->bucket    = $bucket;
+        $this->endpoint  = rtrim($endpoint, '/');
+        $this->region    = $region;
+        $this->urlExpiry = $expiry;
 
         $this->client = new S3Client([
             'version'                 => 'latest',
-            'region'                  => $this->config['region'],
-            'endpoint'                => $this->config['endpoint'],
-            'use_path_style_endpoint' => true, // WAJIB untuk IDrive e2
+            'region'                  => $this->region,
+            'endpoint'                => $this->endpoint,
+            'use_path_style_endpoint' => true,   // WAJIB untuk IDrive e2
             'credentials'             => [
-                'key'    => $this->config['key'],
-                'secret' => $this->config['secret'],
+                'key'    => $key,
+                'secret' => $secret,
+            ],
+            'retries' => 3,
+            'http'    => [
+                'connect_timeout' => 10,
+                'timeout'         => 300,
             ],
         ]);
     }
 
+    // ═════════════════════════════════════════════════════════════════════
+    // METHOD: uploadFile
+    // ═════════════════════════════════════════════════════════════════════
+
     /**
      * Upload file ke IDrive e2
      *
-     * @param  \CodeIgniter\HTTP\Files\UploadedFile $file      File dari request
-     * @param  string                               $path      Path di dalam bucket, contoh: "tenant-3/materi/file.pdf"
-     * @param  string|null                          $bucket    Override bucket (per-tenant bucket opsional)
-     * @return string                               URL object yang diupload
-     * @throws \RuntimeException
+     * @param  string      $filePath  Path lokal file (dari $file->getTempName())
+     * @param  string      $fileName  Key/path di bucket: "tenant-3/materi/slide.pdf"
+     * @param  string      $fileType  MIME type: "application/pdf"
+     * @param  string|null $bucket    Override bucket (null = dari .env)
+     * @param  bool        $isPublic  true = public-read, false = private
+     * @return array{success: bool, key: string, url: string, size: int, message: string}
      */
-    public function upload(\CodeIgniter\HTTP\Files\UploadedFile $file, string $path, ?string $bucket = null): string
-    {
-        $bucket = $bucket ?? $this->config['bucket'];
+    public function uploadFile(
+        string  $filePath,
+        string  $fileName,
+        string  $fileType,
+        ?string $bucket = null,
+        bool    $isPublic = false
+    ): array {
+        $bucket = $bucket ?? $this->bucket;
 
-        // Sanitasi nama file — hindari path traversal
-        $safePath = $this->sanitizePath($path);
+        if (! file_exists($filePath) || ! is_readable($filePath)) {
+            return $this->errorResponse("File tidak ditemukan atau tidak dapat dibaca: {$filePath}");
+        }
+
+        $detectedMime = mime_content_type($filePath);
+        $mimeToCheck  = $detectedMime ?: $fileType;
+
+        if (! in_array($mimeToCheck, $this->allowedMimeTypes, true)) {
+            return $this->errorResponse(
+                "Tipe file tidak diizinkan: {$mimeToCheck}."
+            );
+        }
+
+        $fileSize = filesize($filePath);
+        if ($fileSize > $this->maxFileSizeBytes) {
+            $maxMb = $this->maxFileSizeBytes / 1_048_576;
+            return $this->errorResponse(
+                "Ukuran file melebihi batas maksimum {$maxMb} MB. " .
+                "Ukuran file: " . round($fileSize / 1_048_576, 2) . " MB"
+            );
+        }
+
+        $safeKey = $this->sanitizeKey($fileName);
 
         try {
-            $result = $this->client->putObject([
-                'Bucket'      => $bucket,
-                'Key'         => $safePath,
-                'Body'        => fopen($file->getTempName(), 'rb'),
-                'ContentType' => $file->getMimeType(),
-                // ACL: gunakan 'private' untuk materi berbayar/restricted
-                // gunakan 'public-read' untuk materi publik
-                'ACL'         => 'private',
+            // MultipartUploader menangani file kecil & besar secara otomatis
+            $uploader = new \Aws\S3\MultipartUploader($this->client, $filePath, [
+                'bucket'      => $bucket,
+                'key'         => $safeKey,
+                'ContentType' => $mimeToCheck,
+                'ACL'         => $isPublic ? 'public-read' : 'private',
             ]);
 
-            log_message('info', "[Storage] Upload sukses: {$bucket}/{$safePath}");
+            $result = $uploader->upload();
 
-            return (string) $result['ObjectURL'];
+            $objectUrl = $isPublic
+                ? (string) $result['ObjectURL']
+                : $this->getFileUrl($safeKey, $bucket);
+
+            log_message('info', sprintf(
+                '[StorageManager] Upload sukses. Key: %s | Bucket: %s | Size: %s bytes',
+                $safeKey, $bucket, $fileSize
+            ));
+
+            return [
+                'success' => true,
+                'key'     => $safeKey,
+                'url'     => $objectUrl,
+                'size'    => $fileSize,
+                'message' => 'Upload berhasil.',
+            ];
+
+        } catch (MultipartUploadException $e) {
+            // Fix: Aws\Exception\MultipartUploadException (bukan Aws\S3\Exception\)
+            $this->abortMultipartUpload($e, $bucket, $safeKey);
+            log_message('error', '[StorageManager] Multipart upload gagal: ' . $e->getMessage());
+            return $this->errorResponse('Upload file gagal (multipart): ' . $e->getMessage());
+
+        } catch (S3Exception $e) {
+            log_message('error', '[StorageManager] S3Exception saat upload: ' . $e->getAwsErrorMessage());
+            return $this->errorResponse('Upload file gagal: ' . $e->getAwsErrorMessage());
 
         } catch (AwsException $e) {
-            log_message('error', '[Storage] Upload gagal: ' . $e->getMessage());
-            throw new \RuntimeException('Upload file gagal: ' . $e->getAwsErrorMessage());
+            log_message('error', '[StorageManager] AwsException saat upload: ' . $e->getMessage());
+            return $this->errorResponse('Upload file gagal (AWS): ' . $e->getMessage());
+
+        } catch (\Throwable $e) {
+            log_message('error', '[StorageManager] Exception tidak terduga saat upload: ' . $e->getMessage());
+            return $this->errorResponse('Upload file gagal (internal): ' . $e->getMessage());
         }
     }
 
+    // ═════════════════════════════════════════════════════════════════════
+    // METHOD: getFileUrl
+    // ═════════════════════════════════════════════════════════════════════
+
     /**
-     * Generate pre-signed URL untuk akses temporary (private objects)
-     * Berguna untuk streaming video/materi tanpa expose bucket secara langsung
+     * Generate pre-signed URL untuk akses sementara ke private object
      *
-     * @param  string $key        Path object di bucket
-     * @param  string $bucket     Nama bucket
-     * @param  int    $expiry     Durasi validitas URL dalam detik (default 1 jam)
-     * @return string             Pre-signed URL
+     * @param  string      $fileName  Key object di bucket
+     * @param  string|null $bucket    Override bucket
+     * @param  int|null    $expiry    Durasi validitas dalam detik
+     * @return string                 Pre-signed URL
+     * @throws \RuntimeException
      */
-    public function getPresignedUrl(string $key, string $bucket = '', int $expiry = 3600): string
+    public function getFileUrl(string $fileName, ?string $bucket = null, ?int $expiry = null): string
     {
-        $bucket = $bucket ?: $this->config['bucket'];
+        $bucket  = $bucket  ?? $this->bucket;
+        $expiry  = $expiry  ?? $this->urlExpiry;
+        $safeKey = $this->sanitizeKey($fileName);
 
-        $cmd = $this->client->getCommand('GetObject', [
-            'Bucket' => $bucket,
-            'Key'    => $key,
-        ]);
+        try {
+            if (! $this->fileExists($safeKey, $bucket)) {
+                throw new \RuntimeException(
+                    "Object tidak ditemukan di bucket '{$bucket}': {$safeKey}"
+                );
+            }
 
-        $request = $this->client->createPresignedRequest($cmd, "+{$expiry} seconds");
+            $command = $this->client->getCommand('GetObject', [
+                'Bucket'                     => $bucket,
+                'Key'                        => $safeKey,
+                'ResponseContentDisposition' => 'inline; filename="' . basename($safeKey) . '"',
+            ]);
 
-        return (string) $request->getUri();
+            $presignedRequest = $this->client->createPresignedRequest(
+                $command,
+                "+{$expiry} seconds"
+            );
+
+            $url = (string) $presignedRequest->getUri();
+
+            log_message('info', sprintf(
+                '[StorageManager] Pre-signed URL dibuat. Key: %s | Expiry: %ds',
+                $safeKey, $expiry
+            ));
+
+            return $url;
+
+        } catch (\RuntimeException $e) {
+            throw $e;
+
+        } catch (S3Exception $e) {
+            log_message('error', '[StorageManager] S3Exception saat getFileUrl: ' . $e->getAwsErrorMessage());
+            throw new \RuntimeException('Gagal mendapatkan URL file: ' . $e->getAwsErrorMessage());
+
+        } catch (AwsException $e) {
+            log_message('error', '[StorageManager] AwsException saat getFileUrl: ' . $e->getMessage());
+            throw new \RuntimeException('Gagal mendapatkan URL file (AWS): ' . $e->getMessage());
+
+        } catch (\Throwable $e) {
+            log_message('error', '[StorageManager] Exception tidak terduga saat getFileUrl: ' . $e->getMessage());
+            throw new \RuntimeException('Gagal mendapatkan URL file (internal): ' . $e->getMessage());
+        }
     }
 
+    // ═════════════════════════════════════════════════════════════════════
+    // METHOD: deleteFile
+    // ═════════════════════════════════════════════════════════════════════
+
     /**
-     * Hapus object dari bucket
+     * @return array{success: bool, key: string, url: string, size: int, message: string}
      */
-    public function delete(string $key, ?string $bucket = null): bool
+    public function deleteFile(string $fileName, ?string $bucket = null): array
     {
-        $bucket = $bucket ?? $this->config['bucket'];
+        $bucket  = $bucket ?? $this->bucket;
+        $safeKey = $this->sanitizeKey($fileName);
 
         try {
             $this->client->deleteObject([
                 'Bucket' => $bucket,
-                'Key'    => $key,
+                'Key'    => $safeKey,
             ]);
 
-            log_message('info', "[Storage] Delete sukses: {$bucket}/{$key}");
-            return true;
+            log_message('info', "[StorageManager] Delete sukses: {$bucket}/{$safeKey}");
+
+            return [
+                'success' => true,
+                'key'     => $safeKey,
+                'url'     => '',
+                'size'    => 0,
+                'message' => 'File berhasil dihapus.',
+            ];
+
+        } catch (S3Exception $e) {
+            log_message('error', '[StorageManager] S3Exception saat delete: ' . $e->getAwsErrorMessage());
+            return $this->errorResponse('Hapus file gagal: ' . $e->getAwsErrorMessage());
 
         } catch (AwsException $e) {
-            log_message('error', '[Storage] Delete gagal: ' . $e->getMessage());
+            log_message('error', '[StorageManager] AwsException saat delete: ' . $e->getMessage());
+            return $this->errorResponse('Hapus file gagal (AWS): ' . $e->getMessage());
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // METHOD: fileExists
+    // ═════════════════════════════════════════════════════════════════════
+
+    public function fileExists(string $fileName, ?string $bucket = null): bool
+    {
+        $bucket  = $bucket ?? $this->bucket;
+        $safeKey = $this->sanitizeKey($fileName);
+
+        try {
+            return $this->client->doesObjectExist($bucket, $safeKey);
+        } catch (AwsException $e) {
+            log_message('error', '[StorageManager] Exception saat fileExists: ' . $e->getMessage());
             return false;
         }
     }
 
+    // ═════════════════════════════════════════════════════════════════════
+    // METHOD: createTenantBucket
+    // ═════════════════════════════════════════════════════════════════════
+
     /**
-     * Buat bucket baru (dipanggil saat tenant baru dibuat)
+     * @return array{success: bool, key: string, url: string, size: int, message: string}
      */
-    public function createBucket(string $bucketName): bool
+    public function createTenantBucket(string $bucketName): array
     {
+        if (! preg_match('/^[a-z0-9\-]{3,63}$/', $bucketName)) {
+            return $this->errorResponse(
+                'Nama bucket tidak valid. Gunakan huruf kecil, angka, dan strip (3-63 karakter).'
+            );
+        }
+
         try {
             $this->client->createBucket(['Bucket' => $bucketName]);
-            log_message('info', "[Storage] Bucket dibuat: {$bucketName}");
-            return true;
+
+            $this->client->putPublicAccessBlock([
+                'Bucket' => $bucketName,
+                'PublicAccessBlockConfiguration' => [
+                    'BlockPublicAcls'       => true,
+                    'BlockPublicPolicy'     => true,
+                    'IgnorePublicAcls'      => true,
+                    'RestrictPublicBuckets' => true,
+                ],
+            ]);
+
+            log_message('info', "[StorageManager] Bucket dibuat: {$bucketName}");
+
+            return [
+                'success' => true,
+                'key'     => $bucketName,
+                'url'     => '',
+                'size'    => 0,
+                'message' => "Bucket '{$bucketName}' berhasil dibuat.",
+            ];
+
+        } catch (S3Exception $e) {
+            if ($e->getAwsErrorCode() === 'BucketAlreadyOwnedByYou') {
+                return [
+                    'success' => true,
+                    'key'     => $bucketName,
+                    'url'     => '',
+                    'size'    => 0,
+                    'message' => "Bucket '{$bucketName}' sudah ada.",
+                ];
+            }
+
+            log_message('error', '[StorageManager] S3Exception createBucket: ' . $e->getAwsErrorMessage());
+            return $this->errorResponse('Gagal membuat bucket: ' . $e->getAwsErrorMessage());
+
         } catch (AwsException $e) {
-            log_message('error', '[Storage] Create bucket gagal: ' . $e->getMessage());
-            return false;
+            log_message('error', '[StorageManager] AwsException createBucket: ' . $e->getMessage());
+            return $this->errorResponse('Gagal membuat bucket (AWS): ' . $e->getMessage());
         }
     }
 
+    // ═════════════════════════════════════════════════════════════════════
+    // METHOD: ping
+    // ═════════════════════════════════════════════════════════════════════
+
     /**
-     * Cek koneksi ke IDrive e2 (health check)
+     * @return array{success: bool, key: string, url: string, size: int, message: string, buckets?: array}
      */
-    public function ping(): bool
+    public function ping(): array
     {
         try {
-            $this->client->listBuckets();
-            return true;
+            $result  = $this->client->listBuckets();
+            $buckets = array_column($result['Buckets'], 'Name');
+
+            return [
+                'success' => true,
+                'key'     => '',
+                'url'     => '',
+                'size'    => 0,
+                'message' => 'Koneksi ke IDrive e2 berhasil.',
+                'buckets' => $buckets,
+            ];
+
         } catch (AwsException $e) {
-            log_message('error', '[Storage] Ping gagal: ' . $e->getMessage());
-            return false;
+            log_message('error', '[StorageManager] Ping gagal: ' . $e->getMessage());
+            return $this->errorResponse('Koneksi ke IDrive e2 gagal: ' . $e->getMessage());
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // PRIVATE HELPERS
+    // ═════════════════════════════════════════════════════════════════════
+
+    private function sanitizeKey(string $key): string
+    {
+        $key = str_replace(["\0", '../', '.\\'], '', $key);
+        $key = str_replace('\\', '/', $key);
+        $key = preg_replace('#/+#', '/', $key);
+        $key = ltrim($key, '/');
+
+        if (strlen($key) > 1024) {
+            $ext = pathinfo($key, PATHINFO_EXTENSION);
+            $key = substr($key, 0, 1020) . ($ext ? ".{$ext}" : '');
+        }
+
+        return $key;
+    }
+
+    /**
+     * Batalkan multipart upload yang gagal agar tidak meninggalkan fragment berbayar
+     */
+    private function abortMultipartUpload(
+        MultipartUploadException $e,   // Fix: pakai alias dari use statement
+        string $bucket,
+        string $key
+    ): void {
+        try {
+            $state    = $e->getState();
+            $uploadId = $state->getId();
+
+            if ($uploadId) {
+                $this->client->abortMultipartUpload([
+                    'Bucket'   => $bucket,
+                    'Key'      => $key,
+                    'UploadId' => $uploadId,
+                ]);
+                log_message('info', "[StorageManager] Multipart upload dibatalkan: {$key}");
+            }
+        } catch (\Throwable $abort) {
+            log_message('error', '[StorageManager] Gagal membatalkan multipart: ' . $abort->getMessage());
         }
     }
 
     /**
-     * Sanitasi path — cegah path traversal
+     * @return array{success: bool, key: string, url: string, size: int, message: string}
      */
-    private function sanitizePath(string $path): string
+    private function errorResponse(string $message): array
     {
-        // Hapus ../ dan karakter berbahaya
-        $path = str_replace(['../', '..\\', "\0"], '', $path);
-        // Normalisasi slash
-        $path = ltrim(preg_replace('#/+#', '/', $path), '/');
-        return $path;
+        return [
+            'success' => false,
+            'key'     => '',
+            'url'     => '',
+            'size'    => 0,
+            'message' => $message,
+        ];
     }
 }
