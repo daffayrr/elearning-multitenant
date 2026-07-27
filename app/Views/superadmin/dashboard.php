@@ -1,3 +1,12 @@
+<?php
+/**
+ * @var string $pageTitle
+ * @var array $stats
+ * @var array $tenants
+ * @var array $userCounts
+ */
+?>
+
 <!DOCTYPE html>
 <html lang="id">
 <head>
@@ -88,18 +97,18 @@
                         <?php foreach ($tenants as $tenant): ?>
                         <tr class="hover:bg-gray-50">
                             <td class="px-6 py-4 font-medium text-gray-800">
-                                <?= esc($tenant['name']) ?>
+                                <?= esc($tenant->name) ?>
                             </td>
                             <td class="px-6 py-4">
                                 <code class="bg-gray-100 text-indigo-700 px-2 py-0.5 rounded text-xs">
-                                    <?= esc($tenant['url_string']) ?>
+                                    <?= esc($tenant->tenant_string_id ?? $tenant->url_string ?? '-') ?>
                                 </code>
                             </td>
                             <td class="px-6 py-4 text-gray-600">
-                                <?= esc($userCounts[$tenant['id']] ?? 0) ?>
+                                <?= esc($userCounts[$tenant->id] ?? 0) ?>
                             </td>
                             <td class="px-6 py-4">
-                                <?php if ($tenant['is_active']): ?>
+                                <?php if ($tenant->status === 'active'): ?>
                                     <span class="bg-green-100 text-green-700 text-xs px-2 py-1 rounded-full font-medium">
                                         Aktif
                                     </span>
@@ -110,19 +119,19 @@
                                 <?php endif; ?>
                             </td>
                             <td class="px-6 py-4 text-gray-500 text-xs">
-                                <?= date('d M Y', strtotime($tenant['created_at'])) ?>
+                                <?= date('d M Y', strtotime($tenant->created_at)) ?>
                             </td>
                             <td class="px-6 py-4">
                                 <div class="flex gap-2">
-                                    <a href="/superadmin/tenants/<?= $tenant['id'] ?>"
+                                    <a href="/superadmin/tenants/<?= $tenant->id ?>"
                                        class="text-indigo-600 hover:underline text-xs">Detail</a>
                                     <form method="POST"
-                                          action="/superadmin/tenants/<?= $tenant['id'] ?>/toggle"
+                                          action="/superadmin/tenants/<?= $tenant->id ?>/toggle"
                                           onsubmit="return confirm('Yakin ubah status tenant ini?')">
                                         <?= csrf_field() ?>
                                         <button type="submit"
-                                                class="text-xs <?= $tenant['is_active'] ? 'text-red-500' : 'text-green-600' ?> hover:underline">
-                                            <?= $tenant['is_active'] ? 'Blokir' : 'Aktifkan' ?>
+                                                class="text-xs <?= $tenant->status === 'active' ? 'text-red-500' : 'text-green-600' ?> hover:underline">
+                                            <?= $tenant->status === 'active' ? 'Blokir' : 'Aktifkan' ?>
                                         </button>
                                     </form>
                                 </div>
@@ -144,4 +153,4 @@
 </div>
 
 </body>
-</html>
+</html> 

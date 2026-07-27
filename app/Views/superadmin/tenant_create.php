@@ -1,3 +1,9 @@
+<?php
+/**
+ * @var string $pageTitle
+ */
+?>
+
 <!DOCTYPE html>
 <html lang="id">
 <head>

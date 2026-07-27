@@ -37,19 +37,20 @@ class AuthController extends BaseController
             ->where('is_blocked', 0)
             ->first();
 
-        if (! $user || ! password_verify($this->request->getPost('password'), $user['password'])) {
+        // Menggunakan $user->password_hash karena returnType pada UserModel adalah 'object'
+        if (! $user || ! password_verify((string) $this->request->getPost('password'), $user->password_hash)) {
             return redirect()->back()->withInput()
                 ->with('error', 'Email atau password tidak valid.');
         }
 
         session()->regenerate(true);
         session()->set([
-            'user_id'     => $user['id'],
-            'tenant_id'   => null,
-            'role'        => 'super_admin',
-            'name'        => $user['name'],
-            'email'       => $user['email'],
-            'is_logged_in'=> true,
+            'user_id'      => $user->id,
+            'tenant_id'    => null,
+            'role'         => 'super_admin',
+            'name'         => $user->full_name, // Disesuaikan dengan nama kolom di database
+            'email'        => $user->email,
+            'is_logged_in' => true,
         ]);
 
         return redirect()->to('/superadmin/dashboard');

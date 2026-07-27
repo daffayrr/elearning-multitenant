@@ -27,9 +27,10 @@ class SuperAdminController extends BaseController
         $db = db_connect();
 
         // Statistik ringkasan — query COUNT langsung agar efisien
+        // Ubah is_active, 1 menjadi status, 'active'
         $stats = [
             'total_tenants'  => $this->tenantModel->countAll(),
-            'active_tenants' => $this->tenantModel->where('is_active', 1)->countAllResults(),
+            'active_tenants' => $this->tenantModel->where('status', 'active')->countAllResults(),
             'total_users'    => $this->userModel->where('role !=', 'super_admin')->countAllResults(),
             'total_courses'  => $db->table('courses')->countAll(),
         ];
@@ -42,8 +43,9 @@ class SuperAdminController extends BaseController
         // Jumlah user per tenant (untuk ditampilkan di tabel)
         $userCounts = [];
         foreach ($tenants as $tenant) {
-            $userCounts[$tenant['id']] = $this->userModel
-                ->where('tenant_id', $tenant['id'])
+            // Akses object properti ->id (karena returnType 'object')
+            $userCounts[$tenant->id] = $this->userModel
+                ->where('tenant_id', $tenant->id)
                 ->countAllResults();
         }
 
@@ -96,7 +98,7 @@ class SuperAdminController extends BaseController
             'url_string'     => [
                 'label' => 'URL Identifier',
                 'rules' => 'required|alpha_dash|min_length[3]|max_length[100]'
-                         . '|is_unique[tenants.url_string]',
+                         . '|is_unique[tenants.tenant_string_id]', // <--- UBAH DI SINI
                 'errors' => [
                     'is_unique'  => 'URL Identifier sudah digunakan oleh tenant lain.',
                     'alpha_dash' => 'URL Identifier hanya boleh berisi huruf, angka, strip, dan underscore.',
@@ -147,7 +149,7 @@ class SuperAdminController extends BaseController
         $domain       = $this->request->getPost('domain') ?: null;
         $adminName    = trim($this->request->getPost('admin_name'));
         $adminEmail   = strtolower(trim($this->request->getPost('admin_email')));
-        $adminPassword= $this->request->getPost('admin_password');
+        $adminPassword= (string) $this->request->getPost('admin_password');
 
         // ─── Cek duplikat email admin di level global ─────────────────────
         // (is_unique di validasi hanya berlaku untuk kolom tenant, bukan users)
@@ -170,12 +172,13 @@ class SuperAdminController extends BaseController
 
         try {
             // 1. Insert tenant
-            $tenantId = $this->tenantModel->insert([
-                'name'       => $tenantName,
-                'url_string' => $urlString,
-                'domain'     => $domain,
-                'is_active'  => 1,
-            ], true); // true = return insert ID
+           // Ubah 'is_active' => 1 menjadi 'status' => 'active'
+           $tenantId = $this->tenantModel->insert([
+            'name'               => $tenantName,
+            'tenant_string_id'   => $urlString, // Sesuai DDL (jika di DB Anda menggunakan url_string, biarkan url_string)
+            'domain'             => $domain,
+            'status'             => 'active',
+        ], true);
 
             if (! $tenantId) {
                 throw new \RuntimeException('Gagal menyimpan data tenant.');
@@ -186,9 +189,10 @@ class SuperAdminController extends BaseController
             // sudah di-hash eksplisit di sini untuk kontrol penuh
             $userInserted = $this->userModel->insert([
                 'tenant_id'  => $tenantId,
-                'name'       => $adminName,
+                'full_name'  => $adminName, // Disesuaikan dengan struktur tabel users: full_name (bukan name)
+                'username'   => $urlString . '_admin', // Menambahkan default username karena wajib di database
                 'email'      => $adminEmail,
-                'password'   => password_hash($adminPassword, PASSWORD_BCRYPT, ['cost' => 12]),
+                'password_hash' => password_hash($adminPassword, PASSWORD_BCRYPT, ['cost' => 12]), // Disesuaikan ke password_hash
                 'role'       => 'tenant_admin',
                 'is_blocked' => 0,
             ]);
@@ -209,7 +213,7 @@ class SuperAdminController extends BaseController
                 $tenantId,
                 $tenantName,
                 $adminEmail,
-                session()->get('email')
+                session()->get('email') ?? 'Super Admin'
             ));
 
             return redirect()->to('/superadmin/tenants')
@@ -217,7 +221,6 @@ class SuperAdminController extends BaseController
 
         } catch (\RuntimeException $e) {
             $db->transRollback();
-
             log_message('error', '[SuperAdmin] storeTenant gagal: ' . $e->getMessage());
 
             return redirect()->back()
@@ -226,7 +229,6 @@ class SuperAdminController extends BaseController
 
         } catch (DatabaseException $e) {
             $db->transRollback();
-
             log_message('error', '[SuperAdmin] DatabaseException storeTenant: ' . $e->getMessage());
 
             return redirect()->back()
@@ -235,7 +237,6 @@ class SuperAdminController extends BaseController
 
         } catch (\Throwable $e) {
             $db->transRollback();
-
             log_message('error', '[SuperAdmin] Exception tidak terduga storeTenant: ' . $e->getMessage());
 
             return redirect()->back()
@@ -256,22 +257,22 @@ class SuperAdminController extends BaseController
                 ->with('error', 'Tenant tidak ditemukan.');
         }
 
-        // Toggle status: 1 → 0, 0 → 1
-        $newStatus  = $tenant['is_active'] === 1 ? 0 : 1;
-        $statusText = $newStatus === 1 ? 'diaktifkan' : 'diblokir';
+        // Toggle status: 'active' → 'blocked'
+        $newStatus  = $tenant->status === 'active' ? 'blocked' : 'active';
+        $statusText = $newStatus === 'active' ? 'diaktifkan' : 'diblokir';
 
-        $this->tenantModel->update($id, ['is_active' => $newStatus]);
+        $this->tenantModel->update($id, ['status' => $newStatus]);
 
         log_message('info', sprintf(
             '[SuperAdmin] Tenant ID %d (%s) %s oleh User ID %s.',
             $id,
-            $tenant['name'],
+            $tenant->name,
             $statusText,
-            session()->get('user_id')
+            session()->get('user_id') ?? 'System'
         ));
 
         return redirect()->to('/superadmin/tenants')
-            ->with('success', "Tenant '{$tenant['name']}' berhasil {$statusText}.");
+            ->with('success', "Tenant '{$tenant->name}' berhasil {$statusText}.");
     }
 
     // ═════════════════════════════════════════════════════════════════════
@@ -286,7 +287,7 @@ class SuperAdminController extends BaseController
                 ->with('error', 'Tenant tidak ditemukan.');
         }
 
-        $users = $this->userModel
+         $users = $this->userModel
             ->where('tenant_id', $id)
             ->orderBy('created_at', 'DESC')
             ->findAll();
@@ -294,7 +295,7 @@ class SuperAdminController extends BaseController
         return view('superadmin/tenant_detail', [
             'tenant'    => $tenant,
             'users'     => $users,
-            'pageTitle' => 'Detail Tenant: ' . $tenant['name'],
+            'pageTitle' => 'Detail Tenant: ' . $tenant->name,
         ]);
     }
 }

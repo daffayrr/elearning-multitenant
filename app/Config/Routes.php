@@ -5,6 +5,13 @@ use CodeIgniter\Router\RouteCollection;
 /** @var RouteCollection $routes */
 
 // ═══════════════════════════════════════════════════════════════════════════
+// DEFAULT ROUTE (Perbaikan untuk GET: /)
+// ═══════════════════════════════════════════════════════════════════════════
+// Ini akan mengarahkan root url (http://localhost:8080) ke Home controller 
+// atau bisa Anda ubah jika ingin langsung redirect ke halaman login
+$routes->get('/', 'Home::index'); 
+
+// ═══════════════════════════════════════════════════════════════════════════
 // SUPER ADMIN ROUTES
 // ═══════════════════════════════════════════════════════════════════════════
 $routes->group('superadmin', static function ($routes) {
@@ -15,6 +22,11 @@ $routes->group('superadmin', static function ($routes) {
 
     // Semua rute di bawah ini dilindungi SuperAdminFilter
     $routes->group('', ['filter' => 'superadmin'], static function ($routes) {
+        
+        // Perbaikan untuk GET: superadmin
+        // Menangani url http://localhost:8080/superadmin agar langsung ke dashboard
+        $routes->get('/', 'SuperAdmin\SuperAdminController::index');
+
         $routes->get('logout',   'SuperAdmin\AuthController::logout');
 
         // Dashboard
