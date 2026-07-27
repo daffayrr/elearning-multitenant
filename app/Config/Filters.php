@@ -40,6 +40,8 @@ class Filters extends BaseFilters
         'role_admin'  => \App\Filters\RoleFilter::class,  // akan dijelaskan di bawah
         'role_instructor' => \App\Filters\RoleFilter::class,
         'role_student' => \App\Filters\RoleFilter::class,
+        'superadmin'      => \App\Filters\SuperAdminFilter::class,   // ← tambah
+
     ];
 
     /**
