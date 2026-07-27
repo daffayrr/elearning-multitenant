@@ -5,6 +5,7 @@ namespace App\Controllers\Auth;
 use App\Controllers\BaseController;
 use App\Models\UserModel;
 use App\Models\TenantModel;
+use CodeIgniter\HTTP\RedirectResponse;
 
 class AuthController extends BaseController
 {
@@ -19,11 +20,13 @@ class AuthController extends BaseController
 
     // ─────────────────────────────────────────────────────────────────────
     // LOGIN FORM
+    // Fix P1006 & PHP0408: return type diubah ke ResponseInterface|string
+    // karena method bisa return redirect (RedirectResponse) ATAU view (string)
     // ─────────────────────────────────────────────────────────────────────
-    public function loginForm(string $tenantStringId): string
+    public function loginForm(string $tenantStringId): RedirectResponse|string
     {
-        // Jika sudah login, redirect sesuai role
         if (session()->has('user_id')) {
+            // Sudah login — redirect ke area sesuai role
             return $this->redirectByRole($tenantStringId);
         }
 
@@ -35,9 +38,8 @@ class AuthController extends BaseController
     // ─────────────────────────────────────────────────────────────────────
     // LOGIN PROCESS
     // ─────────────────────────────────────────────────────────────────────
-    public function loginProcess(string $tenantStringId)
+    public function loginProcess(string $tenantStringId): RedirectResponse
     {
-        // ─── Validasi input ───────────────────────────────────────────────
         $rules = [
             'email'    => 'required|valid_email|max_length[255]',
             'password' => 'required|min_length[8]|max_length[128]',
@@ -64,18 +66,16 @@ class AuthController extends BaseController
                 ->with('error', 'Tenant tidak valid.');
         }
 
-        // ─── Cari user berdasarkan email + tenant_id ──────────────────────
-        // PENTING: Query harus menyertakan tenant_id untuk isolasi data
+        // ─── Cari user: email + tenant_id (isolasi multi-tenant) ─────────
         $user = $this->userModel
             ->where('email', $email)
             ->where('tenant_id', $tenant['id'])
             ->where('is_blocked', 0)
             ->first();
 
-        // ─── Verifikasi password menggunakan password_verify (bcrypt) ─────
-        // Jangan gunakan MD5/SHA1 — gunakan CI4 built-in password hashing
+        // ─── Verifikasi password (bcrypt) ─────────────────────────────────
+        // Pesan error generik agar tidak membocorkan info validasi
         if (! $user || ! password_verify($password, $user['password'])) {
-            // Pesan generik — jangan beri tahu apakah email atau password yang salah
             log_message('info', sprintf(
                 '[Auth] Gagal login. Email: %s | Tenant: %s | IP: %s',
                 $email,
@@ -88,13 +88,13 @@ class AuthController extends BaseController
                 ->with('error', 'Email atau password tidak valid.');
         }
 
-        // ─── Regenerate session ID untuk mencegah session fixation ───────
+        // ─── Regenerate session ID (cegah session fixation attack) ───────
         session()->regenerate(true);
 
-        // ─── Set session data ─────────────────────────────────────────────
+        // ─── Set session ──────────────────────────────────────────────────
         session()->set([
             'user_id'           => $user['id'],
-            'tenant_id'         => $user['tenant_id'],   // NULL untuk super_admin
+            'tenant_id'         => $user['tenant_id'],
             'role'              => $user['role'],
             'name'              => $user['name'],
             'email'             => $user['email'],
@@ -110,22 +110,22 @@ class AuthController extends BaseController
             $this->request->getIPAddress()
         ));
 
-        // ─── Redirect ke area sesuai role ─────────────────────────────────
         return $this->redirectByRole($tenantStringId);
     }
 
     // ─────────────────────────────────────────────────────────────────────
     // LOGOUT
     // ─────────────────────────────────────────────────────────────────────
-    public function logout(string $tenantStringId)
+    public function logout(string $tenantStringId): RedirectResponse
     {
         session()->destroy();
+
         return redirect()->to("/{$tenantStringId}/login")
             ->with('message', 'Anda telah berhasil keluar.');
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // REGISTER FORM (Student self-registration)
+    // REGISTER FORM
     // ─────────────────────────────────────────────────────────────────────
     public function registerForm(string $tenantStringId): string
     {
@@ -137,7 +137,7 @@ class AuthController extends BaseController
     // ─────────────────────────────────────────────────────────────────────
     // REGISTER PROCESS
     // ─────────────────────────────────────────────────────────────────────
-    public function registerProcess(string $tenantStringId)
+    public function registerProcess(string $tenantStringId): RedirectResponse
     {
         $tenant = $this->tenantModel
             ->where('url_string', $tenantStringId)
@@ -161,7 +161,6 @@ class AuthController extends BaseController
                 ->with('errors', $this->validator->getErrors());
         }
 
-        // Cek duplikat email dalam tenant yang sama
         $existing = $this->userModel
             ->where('email', $this->request->getPost('email'))
             ->where('tenant_id', $tenant['id'])
@@ -173,12 +172,10 @@ class AuthController extends BaseController
                 ->with('error', 'Email sudah terdaftar di tenant ini.');
         }
 
-        // Simpan user baru dengan role student
         $this->userModel->insert([
             'tenant_id'  => $tenant['id'],
             'name'       => $this->request->getPost('name'),
             'email'      => $this->request->getPost('email'),
-            // password_hash() lebih eksplisit daripada mengandalkan model callback
             'password'   => password_hash(
                 $this->request->getPost('password'),
                 PASSWORD_BCRYPT,
@@ -195,7 +192,7 @@ class AuthController extends BaseController
     // ─────────────────────────────────────────────────────────────────────
     // HELPER: Redirect berdasarkan role
     // ─────────────────────────────────────────────────────────────────────
-    private function redirectByRole(string $tenantStringId)
+    private function redirectByRole(string $tenantStringId): RedirectResponse
     {
         $role = session()->get('role');
 

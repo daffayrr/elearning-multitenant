@@ -5,31 +5,32 @@ namespace App\Filters;
 use CodeIgniter\Filters\FilterInterface;
 use CodeIgniter\HTTP\RequestInterface;
 use CodeIgniter\HTTP\ResponseInterface;
+use CodeIgniter\HTTP\IncomingRequest;
 use App\Models\TenantModel;
 
 class TenantFilter implements FilterInterface
 {
     public function before(RequestInterface $request, $arguments = null)
     {
+        /** @var IncomingRequest $request */
         $session = session();
 
         // ─── 1. Ekstrak segmen pertama URL ───────────────────────────────────
-        // Contoh URL: /almaata_ac_id_tenant_id_3/admin_tenant/dashboard
-        $tenantStringId = service('router')->detectedLocale()
-            ?? $request->uri->getSegment(1);
+        // Cast ke IncomingRequest agar akses ->uri valid (fix PHP0416)
+        $tenantStringId = $request->getUri()->getSegment(1);
 
-        // Jika tidak ada segmen pertama, tolak akses
         if (empty($tenantStringId)) {
             return service('response')
                 ->setStatusCode(403)
                 ->setBody('403 Forbidden: Tenant identifier missing.');
         }
 
-        // ─── 2. Validasi tenant string ke database ───────────────────────────
+        // ─── 2. Validasi tenant ke database ──────────────────────────────────
         $tenantModel = new TenantModel();
-        $tenant = $tenantModel->where('url_string', $tenantStringId)
-                              ->where('is_active', 1)
-                              ->first();
+        $tenant = $tenantModel
+            ->where('url_string', $tenantStringId)
+            ->where('is_active', 1)
+            ->first();
 
         if (! $tenant) {
             return service('response')
@@ -37,30 +38,25 @@ class TenantFilter implements FilterInterface
                 ->setBody('403 Forbidden: Tenant tidak valid atau tidak aktif.');
         }
 
-        // ─── 3. Simpan tenant ke dalam session & $GLOBALS untuk akses global ─
-        // Ini memungkinkan controller mengakses tenant context tanpa query ulang
-        $session->set('current_tenant_id', $tenant['id']);
-        $session->set('current_tenant_string', $tenantStringId);
+        // Simpan ke session agar controller tidak perlu query ulang
+        $session->set('current_tenant_id',     $tenant['id']);
+        $session->set('current_tenant_string',  $tenantStringId);
 
-        // ─── 4. Cek apakah user sudah login ──────────────────────────────────
+        // ─── 3. Cek login ─────────────────────────────────────────────────────
         if (! $session->has('user_id')) {
-            // Belum login — redirect ke halaman login tenant
             return redirect()->to("/{$tenantStringId}/login");
         }
 
-        $sessionTenantId = $session->get('tenant_id');   // tenant_id dari sesi login
+        $sessionTenantId = $session->get('tenant_id');
         $sessionRole     = $session->get('role');
 
-        // ─── 5. Super Admin bypass — boleh akses tenant manapun ──────────────
-        // Super Admin memiliki tenant_id = NULL di database
+        // ─── 4. Super Admin bypass ────────────────────────────────────────────
         if ($sessionRole === 'super_admin' && is_null($sessionTenantId)) {
-            return; // Lanjutkan tanpa blokir
+            return;
         }
 
-        // ─── 6. Validasi silang: tenant_id sesi VS tenant dari URL ───────────
-        // Ini adalah inti isolasi multi-tenant: user A tidak boleh akses URL tenant B
+        // ─── 5. Validasi silang tenant_id sesi vs URL ─────────────────────────
         if ((int) $sessionTenantId !== (int) $tenant['id']) {
-            // Catat percobaan akses ilegal untuk audit
             log_message('warning', sprintf(
                 '[TenantFilter] Akses ilegal! User ID %s (tenant_id=%s) mencoba akses tenant "%s" (id=%s). IP: %s',
                 $session->get('user_id'),
@@ -74,12 +70,10 @@ class TenantFilter implements FilterInterface
                 ->setStatusCode(403)
                 ->setBody('403 Forbidden: Anda tidak memiliki akses ke tenant ini.');
         }
-
-        // Semua validasi lolos, lanjutkan request
     }
 
     public function after(RequestInterface $request, ResponseInterface $response, $arguments = null)
     {
-        // Tidak ada post-processing yang diperlukan
+        //
     }
 }
