@@ -21,6 +21,6 @@ class UserModel extends Model
     // Dates
     protected $useTimestamps = true;
     protected $createdField  = 'created_at';
-    protected $updatedField  = 'updated_at'; // Kosongkan jika tidak ada di DB
+    protected $updatedField  = ''; // Kosongkan jika tidak ada di DB
     protected $deletedField  = 'deleted_at';
 }

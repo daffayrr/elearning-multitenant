@@ -86,6 +86,10 @@ class StorageManager
 
         $this->bucket    = $bucket;
         $this->endpoint  = rtrim($endpoint, '/');
+        // Ensure endpoint has a scheme
+        if (!preg_match('/^https?:\/\//', $this->endpoint)) {
+            $this->endpoint = 'https://' . $this->endpoint;
+        }
         $this->region    = $region;
         $this->urlExpiry = $expiry;
 
@@ -100,6 +104,7 @@ class StorageManager
             ],
             'retries' => 3,
             'http'    => [
+                'verify'          => false,
                 'connect_timeout' => 10,
                 'timeout'         => 300,
             ],

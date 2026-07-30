@@ -36,11 +36,9 @@ class Filters extends BaseFilters
         'performance'   => PerformanceMetrics::class,
 
         // ─── Custom Filters ───────────────────────────────────────────────
-        'tenant'      => \App\Filters\TenantFilter::class,
-        'role_admin'  => \App\Filters\RoleFilter::class,  // akan dijelaskan di bawah
-        'role_instructor' => \App\Filters\RoleFilter::class,
-        'role_student' => \App\Filters\RoleFilter::class,
-        'superadmin'      => \App\Filters\SuperAdminFilter::class,   // ← tambah
+        'role'       => \App\Filters\RoleFilter::class,
+        'tenant'     => \App\Filters\TenantFilter::class,
+        'superadmin' => \App\Filters\SuperAdminFilter::class,
 
     ];
 

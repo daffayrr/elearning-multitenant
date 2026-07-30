@@ -98,7 +98,7 @@ class SuperAdminController extends BaseController
             'url_string'     => [
                 'label' => 'URL Identifier',
                 'rules' => 'required|alpha_dash|min_length[3]|max_length[100]'
-                         . '|is_unique[tenants.tenant_string_id]', // <--- UBAH DI SINI
+                         . '|is_unique[tenants.tenant_string_id]',
                 'errors' => [
                     'is_unique'  => 'URL Identifier sudah digunakan oleh tenant lain.',
                     'alpha_dash' => 'URL Identifier hanya boleh berisi huruf, angka, strip, dan underscore.',
@@ -171,14 +171,12 @@ class SuperAdminController extends BaseController
         $db->transStart();
 
         try {
-            // 1. Insert tenant
-           // Ubah 'is_active' => 1 menjadi 'status' => 'active'
-           $tenantId = $this->tenantModel->insert([
-            'name'               => $tenantName,
-            'tenant_string_id'   => $urlString, // Sesuai DDL (jika di DB Anda menggunakan url_string, biarkan url_string)
-            'domain'             => $domain,
-            'status'             => 'active',
-        ], true);
+            $tenantId = $this->tenantModel->insert([
+                'name'             => $tenantName,
+                'tenant_string_id' => $urlString, 
+                'domain'           => $domain,
+                'status'           => 'active',
+            ], true);
 
             if (! $tenantId) {
                 throw new \RuntimeException('Gagal menyimpan data tenant.');

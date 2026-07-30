@@ -19,12 +19,36 @@ class AuthController extends BaseController
     }
 
     // ─────────────────────────────────────────────────────────────────────
+    // TENANT ROOT INDEX
+    // ─────────────────────────────────────────────────────────────────────
+    public function tenantIndex(string $tenantStringId): RedirectResponse
+    {
+        $tenant = $this->tenantModel->where('tenant_string_id', $tenantStringId)->where('status', 'active')->first();
+        if (!$tenant) {
+            throw \CodeIgniter\Exceptions\PageNotFoundException::forPageNotFound('Tenant tidak ditemukan.');
+        }
+
+        if (session()->has('user_id')) {
+            // Sudah login — redirect ke area sesuai role
+            return $this->redirectByRole($tenantStringId);
+        }
+
+        // Belum login — redirect ke login page
+        return redirect()->to("/$tenantStringId/login");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
     // LOGIN FORM
     // Fix P1006 & PHP0408: return type diubah ke ResponseInterface|string
     // karena method bisa return redirect (RedirectResponse) ATAU view (string)
     // ─────────────────────────────────────────────────────────────────────
     public function loginForm(string $tenantStringId): RedirectResponse|string
     {
+        $tenant = $this->tenantModel->where('tenant_string_id', $tenantStringId)->where('status', 'active')->first();
+        if (!$tenant) {
+            throw \CodeIgniter\Exceptions\PageNotFoundException::forPageNotFound('Tenant tidak ditemukan.');
+        }
+
         if (session()->has('user_id')) {
             // Sudah login — redirect ke area sesuai role
             return $this->redirectByRole($tenantStringId);
@@ -42,7 +66,7 @@ class AuthController extends BaseController
     {
         $rules = [
             'email'    => 'required|valid_email|max_length[255]',
-            'password' => 'required|min_length[8]|max_length[128]',
+            'password' => 'required|max_length[128]',
         ];
 
         if (! $this->validate($rules)) {
@@ -56,26 +80,24 @@ class AuthController extends BaseController
 
         // ─── Validasi tenant dari URL ─────────────────────────────────────
         $tenant = $this->tenantModel
-            ->where('url_string', $tenantStringId)
-            ->where('is_active', 1)
+            ->where('tenant_string_id', $tenantStringId)
+            ->where('status', 'active')
             ->first();
 
         if (! $tenant) {
-            return redirect()->back()
-                ->withInput()
-                ->with('error', 'Tenant tidak valid.');
+            throw \CodeIgniter\Exceptions\PageNotFoundException::forPageNotFound('Tenant tidak ditemukan.');
         }
 
         // ─── Cari user: email + tenant_id (isolasi multi-tenant) ─────────
         $user = $this->userModel
             ->where('email', $email)
-            ->where('tenant_id', $tenant['id'])
+            ->where('tenant_id', $tenant->id)
             ->where('is_blocked', 0)
             ->first();
 
         // ─── Verifikasi password (bcrypt) ─────────────────────────────────
         // Pesan error generik agar tidak membocorkan info validasi
-        if (! $user || ! password_verify($password, $user['password'])) {
+        if (! $user || ! password_verify($password, $user->password_hash)) {
             log_message('info', sprintf(
                 '[Auth] Gagal login. Email: %s | Tenant: %s | IP: %s',
                 $email,
@@ -93,19 +115,19 @@ class AuthController extends BaseController
 
         // ─── Set session ──────────────────────────────────────────────────
         session()->set([
-            'user_id'           => $user['id'],
-            'tenant_id'         => $user['tenant_id'],
-            'role'              => $user['role'],
-            'name'              => $user['name'],
-            'email'             => $user['email'],
+            'user_id'           => $user->id,
+            'tenant_id'         => $user->tenant_id,
+            'role'              => $user->role,
+            'name'              => $user->full_name,
+            'email'             => $user->email,
             'tenant_string_id'  => $tenantStringId,
             'is_logged_in'      => true,
         ]);
 
         log_message('info', sprintf(
             '[Auth] Login sukses. User ID: %s | Role: %s | Tenant: %s | IP: %s',
-            $user['id'],
-            $user['role'],
+            $user->id,
+            $user->role,
             $tenantStringId,
             $this->request->getIPAddress()
         ));
@@ -129,6 +151,11 @@ class AuthController extends BaseController
     // ─────────────────────────────────────────────────────────────────────
     public function registerForm(string $tenantStringId): string
     {
+        $tenant = $this->tenantModel->where('tenant_string_id', $tenantStringId)->where('status', 'active')->first();
+        if (!$tenant) {
+            throw \CodeIgniter\Exceptions\PageNotFoundException::forPageNotFound('Tenant tidak ditemukan.');
+        }
+
         return view('auth/register', [
             'tenant_string_id' => $tenantStringId,
         ]);
@@ -140,12 +167,12 @@ class AuthController extends BaseController
     public function registerProcess(string $tenantStringId): RedirectResponse
     {
         $tenant = $this->tenantModel
-            ->where('url_string', $tenantStringId)
-            ->where('is_active', 1)
+            ->where('tenant_string_id', $tenantStringId)
+            ->where('status', 'active')
             ->first();
 
         if (! $tenant) {
-            return redirect()->back()->with('error', 'Tenant tidak valid.');
+            throw \CodeIgniter\Exceptions\PageNotFoundException::forPageNotFound('Tenant tidak ditemukan.');
         }
 
         $rules = [
@@ -163,7 +190,7 @@ class AuthController extends BaseController
 
         $existing = $this->userModel
             ->where('email', $this->request->getPost('email'))
-            ->where('tenant_id', $tenant['id'])
+            ->where('tenant_id', $tenant->id)
             ->first();
 
         if ($existing) {
@@ -173,16 +200,16 @@ class AuthController extends BaseController
         }
 
         $this->userModel->insert([
-            'tenant_id'  => $tenant['id'],
-            'name'       => $this->request->getPost('name'),
-            'email'      => $this->request->getPost('email'),
-            'password'   => password_hash(
+            'tenant_id'     => $tenant->id,
+            'full_name'     => $this->request->getPost('name'),
+            'email'         => $this->request->getPost('email'),
+            'password_hash' => password_hash(
                 $this->request->getPost('password'),
                 PASSWORD_BCRYPT,
                 ['cost' => 12]
             ),
-            'role'       => 'tenant_student',
-            'is_blocked' => 0,
+            'role'          => 'student',
+            'is_blocked'    => 0,
         ]);
 
         return redirect()->to("/{$tenantStringId}/login")
@@ -197,14 +224,17 @@ class AuthController extends BaseController
         $role = session()->get('role');
 
         $map = [
-            'super_admin'       => '/superadmin/dashboard',
-            'tenant_admin'      => "/{$tenantStringId}/admin_tenant/dashboard",
-            'tenant_instructor' => "/{$tenantStringId}/instructor/dashboard",
-            'tenant_student'    => "/{$tenantStringId}/student/dashboard",
+            'super_admin'  => '/superadmin/dashboard',
+            'tenant_admin' => "/{$tenantStringId}/admin_tenant/dashboard",
+            'instructor'   => "/{$tenantStringId}/instructor/dashboard",
+            'student'      => "/{$tenantStringId}/student/dashboard",
         ];
 
-        $destination = $map[$role] ?? "/{$tenantStringId}/login";
+        if (!isset($map[$role])) {
+            session()->destroy();
+            return redirect()->to("/{$tenantStringId}/login")->with('error', 'Sesi tidak valid, silakan login kembali.');
+        }
 
-        return redirect()->to($destination);
+        return redirect()->to($map[$role]);
     }
 }

@@ -28,18 +28,16 @@ class TenantFilter implements FilterInterface
         // ─── 2. Validasi tenant ke database ──────────────────────────────────
         $tenantModel = new TenantModel();
         $tenant = $tenantModel
-            ->where('url_string', $tenantStringId)
-            ->where('is_active', 1)
+            ->where('tenant_string_id', $tenantStringId)
+            ->where('status', 'active')
             ->first();
 
         if (! $tenant) {
-            return service('response')
-                ->setStatusCode(403)
-                ->setBody('403 Forbidden: Tenant tidak valid atau tidak aktif.');
+            throw \CodeIgniter\Exceptions\PageNotFoundException::forPageNotFound('Tenant tidak ditemukan atau diblokir.');
         }
 
         // Simpan ke session agar controller tidak perlu query ulang
-        $session->set('current_tenant_id',     $tenant['id']);
+        $session->set('current_tenant_id',     $tenant->id);
         $session->set('current_tenant_string',  $tenantStringId);
 
         // ─── 3. Cek login ─────────────────────────────────────────────────────
@@ -56,13 +54,13 @@ class TenantFilter implements FilterInterface
         }
 
         // ─── 5. Validasi silang tenant_id sesi vs URL ─────────────────────────
-        if ((int) $sessionTenantId !== (int) $tenant['id']) {
+        if ((int) $sessionTenantId !== (int) $tenant->id) {
             log_message('warning', sprintf(
                 '[TenantFilter] Akses ilegal! User ID %s (tenant_id=%s) mencoba akses tenant "%s" (id=%s). IP: %s',
                 $session->get('user_id'),
                 $sessionTenantId,
                 $tenantStringId,
-                $tenant['id'],
+                $tenant->id,
                 $request->getIPAddress()
             ));
 
